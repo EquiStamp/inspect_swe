@@ -1,6 +1,6 @@
-# EquiStamp fork of inspect_swe for the AIO bundle
+# EquiStamp fork of inspect_swe: sub-agent attribution (#111 + #114)
 
-This branch (`aio-bundle`) carries two unmerged upstream pull requests, stacked, so the AIO bundle can pin one commit. It is not a product fork: use upstream [`meridianlabs-ai/inspect_swe`](https://github.com/meridianlabs-ai/inspect_swe) once both PRs are merged and released.
+This branch (`subagent-attribution-111-114`) carries two unmerged upstream pull requests, stacked, so EquiStamp's internal control-tower bundle can pin one commit. It is not a product fork: use upstream [`meridianlabs-ai/inspect_swe`](https://github.com/meridianlabs-ai/inspect_swe) once both PRs are merged and released.
 
 ## What is on this branch
 
