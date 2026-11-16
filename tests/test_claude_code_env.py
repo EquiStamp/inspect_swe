@@ -111,6 +111,16 @@ def test_caller_can_re_enable_auto_memory() -> None:
     assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "0"
 
 
+def test_background_tasks_are_disabled_by_default() -> None:
+    """See ``DISABLE_BACKGROUND_TASKS_ENV``: Agent calls must run in the foreground."""
+    assert _env()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] in TRUTHY_ENV_VALUES
+
+
+def test_caller_can_re_enable_background_tasks() -> None:
+    env = _env(CLAUDE_CODE_DISABLE_BACKGROUND_TASKS="0")
+    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "0"
+
+
 def test_acp_claude_code_disables_auto_memory_too() -> None:
     """The ACP adapter builds its own env; keep it from drifting."""
     from inspect_swe.acp._agents.claude_code.claude_code import _BRIDGE_SAFE_ENV

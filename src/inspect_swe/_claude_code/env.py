@@ -74,6 +74,20 @@ DISABLE_AUTO_MEMORY_ENV: Final = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 
+#: Keep Agent sub-agents in the foreground.
+#:
+#: Claude Code can launch an Agent call in the background even when the model
+#: never asked for ``run_in_background`` (the CLI's ``backgroundLaunchByDefault``
+#: gate, which this variable overrides). The Agent call then returns "Async
+#: agent launched successfully" at once, and under ``--print`` the main thread
+#: can end its turn before any report comes back: an Opus 4.6 run on
+#: CC 2.1.304 said it was waiting for its three sub-agents, stopped, and never
+#: wrote the deliverable their reports were for. Background shells go too,
+#: which a sandbox destroyed with the sample cannot use anyway.
+DISABLE_BACKGROUND_TASKS_ENV: Final = {
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+}
+
 
 def claude_code_agent_env(
     *,
@@ -88,7 +102,8 @@ def claude_code_agent_env(
         models: Resolved presented identities (cosmetic; the bridge routes to
             the real model).
         env: Caller overrides, applied last so any default here can be
-            replaced -- including the MCP startup and auto-memory defaults.
+            replaced -- including the MCP startup, auto-memory and
+            background-task defaults.
 
     Returns:
         The merged environment, caller values winning on conflict.
@@ -107,4 +122,5 @@ def claude_code_agent_env(
         "IS_SANDBOX": "1",
         **BLOCKING_MCP_ENV,
         **DISABLE_AUTO_MEMORY_ENV,
+        **DISABLE_BACKGROUND_TASKS_ENV,
     } | (env or {})
