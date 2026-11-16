@@ -19,6 +19,7 @@ from inspect_ai.model import GenerateConfig, ModelOutput, get_model
 from inspect_ai.model._chat_message import (
     ChatMessage,
     ChatMessageAssistant,
+    ChatMessageTool,
     ChatMessageUser,
 )
 from inspect_ai.tool import ToolCall
@@ -691,3 +692,134 @@ async def test_claude_code_wires_filter_output_tracking(monkeypatch: Any) -> Non
             GenerateConfig(),
         )
     assert list(captured["model_event_sink"]._open_agents) == ["toolu_a"]
+
+
+# ---------------------------------------------------------------------------
+# worker forks (Agent subagent_type "fork")
+# ---------------------------------------------------------------------------
+
+_ENVIRONMENT_REMINDER = "<system-reminder>\n# Environment\nYou have been invoked in the following environment"
+_FORK_BOILERPLATE = "<fork-boilerplate>\nYou are a worker fork. The transcript above is the parent's history."
+
+
+def _agent_launch(call_id: str, subagent_type: str, name: str) -> list[ChatMessage]:
+    """The parent's Agent call as a fork's history carries it, and its launch result."""
+    return [
+        ChatMessageAssistant(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=call_id,
+                    function="Agent",
+                    arguments={
+                        "subagent_type": subagent_type,
+                        "name": name,
+                        "description": f"Audit {name}",
+                        "prompt": f"Audit subsystem {name} and report your findings.",
+                    },
+                )
+            ],
+        ),
+        ChatMessageTool(
+            content="Fork started — processing in background", tool_call_id=call_id
+        ),
+    ]
+
+
+def _fork_request(call_id: str, name: str = "messaging") -> list[ChatMessage]:
+    return [
+        ChatMessageUser(content=_ENVIRONMENT_REMINDER),
+        *_agent_launch(call_id, "fork", name),
+        ChatMessageUser(content=_FORK_BOILERPLATE),
+    ]
+
+
+def _classify_messages(
+    consumer: LiveConsumer, messages: list[ChatMessage]
+) -> AgentBridgeContext:
+    with bridged_request_scope(consumer._models.presented):
+        return consumer.classify(get_model("mockllm/model"), messages, [])
+
+
+_FORK = AgentBridgeContext("subagent", subagent_id="toolu_fork_a", subagent_type="fork")
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        (_fork_request("toolu_fork_a"), _FORK),
+        (
+            [
+                *_fork_request("toolu_fork_a"),
+                ChatMessageAssistant(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="toolu_read", function="Read", arguments={})
+                    ],
+                ),
+                ChatMessageTool(content="file contents", tool_call_id="toolu_read"),
+            ],
+            _FORK,
+        ),
+        (
+            [
+                ChatMessageUser(content=_ENVIRONMENT_REMINDER),
+                *_agent_launch("toolu_fork_a", "fork", "messaging"),
+                *_agent_launch("toolu_fork_b", "fork", "policies"),
+            ],
+            AgentBridgeContext("root"),
+        ),
+        (
+            [
+                ChatMessageUser(content=_ENVIRONMENT_REMINDER),
+                *_agent_launch("toolu_gp", "general-purpose", "messaging"),
+                ChatMessageUser(content=_FORK_BOILERPLATE),
+            ],
+            AgentBridgeContext("root"),
+        ),
+        (
+            [
+                ChatMessageUser(content=_ENVIRONMENT_REMINDER),
+                ChatMessageUser(content=_FORK_BOILERPLATE),
+            ],
+            AgentBridgeContext("root"),
+        ),
+        (
+            [
+                ChatMessageUser(content=_ENVIRONMENT_REMINDER),
+                ChatMessageTool(content="Fork started", tool_call_id="toolu_missing"),
+                ChatMessageUser(content=_FORK_BOILERPLATE),
+            ],
+            AgentBridgeContext("root"),
+        ),
+    ],
+    ids=[
+        "fork-first-request",
+        "fork-later-request",
+        "root-after-launching-forks",
+        "boilerplate-after-a-non-fork-agent",
+        "boilerplate-without-a-launch",
+        "boilerplate-after-an-unknown-call",
+    ],
+)
+def test_classify_identifies_worker_forks_under_the_main_slug(
+    monkeypatch: Any, messages: list[ChatMessage], expected: AgentBridgeContext
+) -> None:
+    consumer = _consumer(monkeypatch)
+    assert _classify_messages(consumer, messages) == expected
+
+
+def test_classify_tells_parallel_forks_apart(monkeypatch: Any) -> None:
+    consumer = _consumer(monkeypatch)
+    a = _classify_messages(consumer, _fork_request("toolu_fork_a", "messaging"))
+    b = _classify_messages(consumer, _fork_request("toolu_fork_b", "policies"))
+    assert (a.subagent_id, b.subagent_id) == ("toolu_fork_a", "toolu_fork_b")
+
+
+def test_forks_do_not_trip_the_subagent_slug_drift_warning(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    consumer = _consumer(monkeypatch)
+    for _ in range(live_consumer_module._SUBAGENT_SLUG_DRIFT_WARN_THRESHOLD + 1):
+        _classify_messages(consumer, _fork_request("toolu_fork_a"))
+    assert _warnings(caplog) == []

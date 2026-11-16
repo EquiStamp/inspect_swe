@@ -95,6 +95,7 @@ from inspect_ai.model._chat_message import (
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageSystem,
+    ChatMessageTool,
     ChatMessageUser,
 )
 from inspect_ai.model._model import ModelEventSink
@@ -139,6 +140,14 @@ _ASYNC_LAUNCH_ACK_PREFIX = "Async agent launched successfully"
 # <task-id> also present in the block -- which is what lets us correlate the
 # notification back to the specific `_open_agents` entry without guessing.
 _TASK_NOTIFICATION_MARKER = "<task-notification>"
+
+# A worker fork's request is its parent's history up to the fork's own Agent
+# call (`subagent_type` "fork"), that call's launch result, then a user turn
+# starting with this marker, which the parent never receives. A fork always
+# requests the parent's model, so the subagent slug can't identify it.
+# Live-verified against CC 2.1.304 (three parallel forks under Opus 4.6).
+_FORK_BOILERPLATE_MARKER = "<fork-boilerplate>"
+_FORK_SUBAGENT_TYPE = "fork"
 _TASK_NOTIFICATION_TOOL_USE_ID_RE = re.compile(
     r"<tool-use-id>\s*([^<\s]+)\s*</tool-use-id>"
 )
@@ -495,6 +504,10 @@ class LiveConsumer(ModelEventSink):
 
         Truth table (checked in this order):
 
+        0. a worker fork's request (its own Agent call with `subagent_type`
+           "fork", that call's result, then the fork boilerplate turn) →
+           "subagent" with that call's id and type "fork" (structural; first
+           because a fork requests the main-thread slug)
         1. slug == subagent slug → "subagent" (structural)
         2. slug == small-fast slug, and that slug is not also a main-thread
            slug → "utility" (structural)
@@ -524,6 +537,11 @@ class LiveConsumer(ModelEventSink):
         request = current_bridge_request()
         slug = request.model if request is not None else None
 
+        # Ahead of the slug checks, and of the drift canary: a fork carries the main slug by design.
+        fork = self._fork_context(messages)
+        if fork is not None:
+            return fork
+
         if slug == self._models.subagent:
             context = self._subagent_context(messages)
         elif slug == self._models.haiku and not self._is_root_slug(slug):
@@ -539,6 +557,37 @@ class LiveConsumer(ModelEventSink):
 
         self._check_subagent_slug_drift(slug, context)
         return context
+
+    @staticmethod
+    def _fork_context(messages: list[ChatMessage]) -> AgentBridgeContext | None:
+        """A worker fork's "subagent" context, identified by its own Agent call; None for any other request."""
+        for index, msg in enumerate(messages):
+            if not (
+                isinstance(msg, ChatMessageUser)
+                and msg.text.lstrip().startswith(_FORK_BOILERPLATE_MARKER)
+            ):
+                continue
+            result = messages[index - 1] if index > 0 else None
+            if not isinstance(result, ChatMessageTool) or not result.tool_call_id:
+                continue
+            launch = next(
+                (
+                    call
+                    for prior in reversed(messages[: index - 1])
+                    if isinstance(prior, ChatMessageAssistant)
+                    for call in prior.tool_calls or []
+                    if call.id == result.tool_call_id
+                ),
+                None,
+            )
+            if launch is None or launch.function not in ("Task", "Agent"):
+                continue
+            if (launch.arguments or {}).get("subagent_type") != _FORK_SUBAGENT_TYPE:
+                continue
+            return AgentBridgeContext(
+                "subagent", subagent_id=launch.id, subagent_type=_FORK_SUBAGENT_TYPE
+            )
+        return None
 
     def _subagent_context(self, messages: list[ChatMessage]) -> AgentBridgeContext:
         """The "subagent" context, identified by a unique pending-prompt match.
